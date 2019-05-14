@@ -19,7 +19,7 @@ contract CourtMock is Court {
         address _governor,
         uint64 _firstTermStartTime,
         uint256 _jurorMinStake,
-        uint64[3] _roundStateDurations,
+        uint64[4] _roundStateDurations,
         uint16 _penaltyPct,
         uint16 _finalRoundReduction,
         uint256[5] _subscriptionParams // _periodDuration, _feeAmount, _prePaymentPeriods, _latePaymentPenaltyPct, _governorSharePct
