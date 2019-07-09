@@ -23,7 +23,7 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
     uint256 internal constant MAX_JURORS_PER_BATCH = 10; // to cap gas used on draft
     uint256 internal constant MAX_REGULAR_APPEAL_ROUNDS = 4; // before the final appeal
     uint256 internal constant FINAL_ROUND_WEIGHT_PRECISION = 1000; // to improve roundings
-    uint32 internal constant APPEAL_STEP_FACTOR = 3;
+    uint64 internal constant APPEAL_STEP_FACTOR = 3;
     // TODO: move all other constants up here
 
     struct Account {
