@@ -166,7 +166,7 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
     uint8 public constant APPEAL_COLLATERAL_FACTOR = 3; // multiple of juror fees required to appeal a preliminary ruling
     uint8 public constant APPEAL_CONFIRMATION_COLLATERAL_FACTOR = 2; // multiple of juror fees required to confirm appeal
     uint64 internal constant MODIFIER_ALLOWED_TERM_TRANSITIONS = 1;
-    bytes4 private constant ARBITRABLE_INTERFACE_ID = 0xabababab; // TODO: interface id
+    //bytes4 private constant ARBITRABLE_INTERFACE_ID = 0xabababab; // TODO: interface id
     uint256 internal constant PCT_BASE = 10000; // ‱
     uint8 internal constant MIN_RULING_OPTIONS = 2;
     uint8 internal constant MAX_RULING_OPTIONS = MIN_RULING_OPTIONS;
@@ -184,9 +184,8 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
     event DisputeStateChanged(uint256 indexed disputeId, DisputeState indexed state);
     event NewDispute(uint256 indexed disputeId, address indexed subject, uint64 indexed draftTermId, uint64 jurorNumber);
     event TokenWithdrawal(address indexed token, address indexed account, uint256 amount);
-    // TODO: event RulingAppealed(uint256 indexed disputeId, uint256 indexed roundId, uint64 indexed draftTermId, uint64 jurorNumber);
     event RulingAppealed(uint256 indexed disputeId, uint256 indexed roundId, uint8 forRuling);
-    event RulingAppealConfirmed(uint256 indexed disputeId, uint256 indexed roundId, uint64 indexed draftTerm, uint256 jurorNumber);
+    event RulingAppealConfirmed(uint256 indexed disputeId, uint256 indexed roundId, uint64 indexed draftTermId, uint256 jurorNumber);
     event RulingExecuted(uint256 indexed disputeId, uint8 indexed ruling);
     event RoundSlashingSettled(uint256 indexed disputeId, uint256 indexed roundId, uint256 collectedTokens);
     event RewardSettled(uint256 indexed disputeId, uint256 indexed roundId, address juror);
@@ -428,12 +427,10 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
         dispute.subject = _subject;
         dispute.possibleRulings = _possibleRulings;
 
-        // TODO: _newAdjudicationRound charges fees for starting the round????
-        (ERC20 feeToken, uint256 feeAmount,) = feeForJurorDraft(_draftTermId, _jurorNumber);
-        if (feeAmount > 0) {
-            require(feeToken.safeTransferFrom(msg.sender, this, feeAmount), ERROR_DEPOSIT_FAILED);
-        }
-        _newAdjudicationRound(disputeId, _jurorNumber, _draftTermId);
+        (ERC20 feeToken, uint256 feeAmount) = feeForRegularRound(_draftTermId, _jurorNumber);
+        // pay round fees
+        _payGeneric(feeToken, feeAmount);
+        _createRound(disputeId, DisputeState.PreDraft, _draftTermId, _jurorNumber, 0);
 
         emit NewDispute(disputeId, _subject, _draftTermId, _jurorNumber);
 
@@ -536,6 +533,7 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
         uint64 configId = terms[draftTermId].courtConfigId;
         CourtConfig storage config = courtConfigs[uint256(configId)];
 
+        // TODO: delayed??
         return draftTermId + config.commitTerms + config.revealTerms + config.appealTerms + config.appealConfirmTerms;
     }
 
@@ -551,35 +549,19 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
         AdjudicationRound storage currentRound = dispute.rounds[_roundId];
 
         uint64 appealJurorNumber;
-        // TODO: uint64 appealDraftTermId = termId + 1; // Appeals are drafted in the next term
         uint64 appealDraftTermId = _endTermForAdjudicationRound(currentRound);
 
         uint8 currentRuling = getWinningRuling(_disputeId);
         require(currentRuling != _forRuling);
         require(currentRound.appealers.length == 0); // This ruling hasn't been appealed yet
 
-        uint256 roundId;
-        if (_roundId == MAX_REGULAR_APPEAL_ROUNDS - 1) { // final round, roundId starts at 0
-            // number of jurors will be the number of times the minimum stake is hold in the tree, multiplied by a precision factor for division roundings
-            (roundId, appealJurorNumber) = _newFinalAdjudicationRound(_disputeId, appealDraftTermId);
-        } else { // no need for more checks, as final appeal won't ever be in Appealable state, so it would never reach here (first check would fail)
-            appealJurorNumber = APPEAL_STEP_FACTOR * currentRound.jurorNumber;
-            // make sure it's odd
-            if (appealJurorNumber % 2 == 0) {
-                appealJurorNumber++;
-            }
-            // _newAdjudicationRound charges fees for starting the round
-            roundId = _newAdjudicationRound(_disputeId, appealJurorNumber, appealDraftTermId);
-        }
+        (,, ERC20 feeToken, uint256 feeAmount) = _getAppealDetails(currentRound, _roundId);
 
-        (ERC20 feeToken, uint256 jurorFeeAmount,) = feeForJurorDraft(appealDraftTermId, appealJurorNumber);
-        uint256 appealDeposit = jurorFeeAmount * APPEAL_COLLATERAL_FACTOR;
-        if (appealDeposit > 0) {
-            require(feeToken.safeTransferFrom(msg.sender, this, appealDeposit), ERROR_DEPOSIT_FAILED);
-        }
+        // pay round collateral
+        uint256 appealDeposit = feeAmount * APPEAL_COLLATERAL_FACTOR;
+        _payGeneric(feeToken, appealDeposit);
         currentRound.appealers.push(Appealer(msg.sender, _forRuling, feeToken, appealDeposit));
 
-        // TODO: emit RulingAppealed(_disputeId, roundId, appealDraftTermId, appealJurorNumber);
         emit RulingAppealed(_disputeId, _roundId, _forRuling);
     }
 
@@ -597,19 +579,44 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
         require(currentRound.appealers.length == 1); // The ruling was appealed and not confirmed
         require(currentRound.appealers[0].forRuling != _forRuling); // Appealing for a different ruling
 
-        uint64 appealJurorNumber = 2 * currentRound.jurorNumber + 1; // J' = 2J + 1
-        uint64 appealDraftTerm = _endTermForAdjudicationRound(currentRound);
+        (uint64 appealDraftTermId, uint64 appealJurorNumber, ERC20 feeToken, uint256 feeAmount) = _getAppealDetails(currentRound, _roundId);
 
-        (ERC20 feeToken, uint256 jurorFeeAmount,) = feeForJurorDraft(appealDraftTerm, appealJurorNumber);
-        uint256 appealDeposit = jurorFeeAmount * APPEAL_CONFIRMATION_COLLATERAL_FACTOR;
-        if (appealDeposit > 0) {
-            require(feeToken.safeTransferFrom(msg.sender, this, appealDeposit), ERROR_DEPOSIT_FAILED);
+        // create round
+        uint256 roundId;
+        if (_roundId == MAX_REGULAR_APPEAL_ROUNDS - 1) { // final round, roundId starts at 0
+            // filledSeats is not used for final round, so we set it to zero
+            roundId = _createRound(_disputeId, DisputeState.Adjudicating, appealDraftTermId, appealJurorNumber, 0);
+        } else { // no need for more checks, as final appeal won't ever be in Appealable state, so it would never reach here (first check would fail)
+            roundId = _createRound(_disputeId, DisputeState.PreDraft, appealDraftTermId, appealJurorNumber, 0);
         }
+
+        // pay round fees
+        _payGeneric(feeToken, feeAmount);
+        // pay round collateral
+        uint256 appealDeposit = feeAmount * APPEAL_CONFIRMATION_COLLATERAL_FACTOR;
+        _payGeneric(feeToken, appealDeposit);
+
         currentRound.appealers.push(Appealer(msg.sender, _forRuling, feeToken, appealDeposit));
 
-        // TODO: uint256 roundId = _newAdjudicationRound(dispute, appealJurorNumber, appealDraftTerm);
-        uint256 roundId = _newAdjudicationRound(_disputeId, appealJurorNumber, appealDraftTerm);
-        emit RulingAppealConfirmed(_disputeId, roundId, appealDraftTerm, appealJurorNumber);
+        emit RulingAppealConfirmed(_disputeId, roundId, appealDraftTermId, appealJurorNumber);
+    }
+
+    function _getAppealDetails(
+        AdjudicationRound storage _currentRound,
+        uint256 _roundId
+    )
+        internal
+        returns (uint64 appealDraftTermId, uint64 appealJurorNumber, ERC20 feeToken, uint256 feeAmount)
+    {
+        appealDraftTermId = _endTermForAdjudicationRound(_currentRound);
+        if (_roundId == MAX_REGULAR_APPEAL_ROUNDS - 1) { // final round, roundId starts at 0
+            // number of jurors will be the number of times the minimum stake is hold in the tree, multiplied by a precision factor for division roundings
+            appealJurorNumber = _getFinalAdjudicationRoundJurorNumber();
+            (feeToken, feeAmount) = feeForFinalRound(appealDraftTermId, appealJurorNumber);
+        } else { // no need for more checks, as final appeal won't ever be in Appealable state, so it would never reach here (first check would fail)
+            appealJurorNumber = _getRegularAdjudicationRoundJurorNumber(_currentRound.jurorNumber);
+            (feeToken, feeAmount) = feeForRegularRound(appealDraftTermId, appealJurorNumber);
+        }
     }
 
     /**
@@ -817,9 +824,9 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
     }
 
     /**
-     * @dev Assumes term is up to date. This function only works for regular rounds. There is no drafting in final round.
+     * @dev Assumes term is up to date. This function only works for regular rounds.
      */
-    function feeForJurorDraft(
+    function feeForRegularRound(
         uint64 _draftTermId,
         uint64 _jurorNumber
     )
@@ -831,6 +838,22 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
 
         feeToken = fees.feeToken;
         feeAmount = fees.heartbeatFee + _jurorNumber * (fees.jurorFee + fees.draftFee + fees.settleFee);
+    }
+
+    function feeForFinalRound(
+        uint64 _draftTermId,
+        uint64 _jurorNumber
+    )
+        public
+        view
+        returns (ERC20 feeToken, uint256 feeAmount)
+    {
+        CourtConfig storage config = _courtConfigForTerm(_draftTermId);
+        feeToken = config.feeToken;
+        // number of jurors is the number of times the minimum stake is hold in the tree, multiplied by a precision factor for division roundings
+        // besides, apply final round discount
+        feeAmount = config.heartbeatFee +
+            _pct4(_jurorNumber * config.jurorFee / FINAL_ROUND_WEIGHT_PRECISION, config.finalRoundReduction);
     }
 
     /**
@@ -1041,46 +1064,26 @@ contract Court is ERC900, ApproveAndCallFallBack, ICRVotingOwner, ISubscriptions
         return governor;
     }
 
-    function _newAdjudicationRound(
-        uint256 _disputeId,
-        uint64 _jurorNumber,
-        uint64 _draftTermId
-    )
-        internal
-        returns (uint256 roundId)
-    {
-        // TODO: remove??
-        (ERC20 feeToken, uint256 feeAmount,) = feeForJurorDraft(_draftTermId, _jurorNumber);
-        if (feeAmount > 0) {
-            require(feeToken.safeTransferFrom(msg.sender, this, feeAmount), ERROR_DEPOSIT_FAILED);
+    function _payGeneric(ERC20 paymentToken, uint256 amount) internal {
+        if (amount > 0) {
+            require(paymentToken.safeTransferFrom(msg.sender, this, amount), ERROR_DEPOSIT_FAILED);
         }
-
-        roundId = _createRound(_disputeId, DisputeState.PreDraft, _draftTermId, _jurorNumber, 0);
     }
 
-    function _newFinalAdjudicationRound(
-        uint256 _disputeId,
-        uint64 _draftTermId
-    )
-        internal
-        returns (uint256 roundId, uint64 jurorNumber)
-    {
+    function _getRegularAdjudicationRoundJurorNumber(uint64 _currentRoundJurorNumber) internal pure returns (uint64 appealJurorNumber) {
+        appealJurorNumber = APPEAL_STEP_FACTOR * _currentRoundJurorNumber;
+        // make sure it's odd
+        if (appealJurorNumber % 2 == 0) {
+            appealJurorNumber++;
+        }
+    }
+
+    // TODO: gives different results depending on when it's called!! (as it depends on current `termId`)
+    function _getFinalAdjudicationRoundJurorNumber() internal view returns (uint64 appealJurorNumber) {
         // the max amount of tokens the tree can hold for this to fit in an uint64 is:
         // 2^64 * jurorMinStake / FINAL_ROUND_WEIGHT_PRECISION
         // (decimals get cancelled in the division). So it seems enough.
-        jurorNumber = uint64(FINAL_ROUND_WEIGHT_PRECISION * sumTree.totalSumPresent(termId) / jurorMinStake);
-
-        CourtConfig storage config = _courtConfigForTerm(_draftTermId);
-        // number of jurors is the number of times the minimum stake is hold in the tree, multiplied by a precision factor for division roundings
-        // besides, apply final round discount
-        uint256 feeAmount = config.heartbeatFee +
-            _pct4(jurorNumber * config.jurorFee / FINAL_ROUND_WEIGHT_PRECISION, config.finalRoundReduction);
-        if (feeAmount > 0) {
-            require(config.feeToken.safeTransferFrom(msg.sender, this, feeAmount), ERROR_DEPOSIT_FAILED);
-        }
-
-        // filledSeats is not used for final round, so we set it to zero
-        roundId = _createRound(_disputeId, DisputeState.Adjudicating, _draftTermId, jurorNumber, 0);
+        appealJurorNumber = uint64(FINAL_ROUND_WEIGHT_PRECISION * sumTree.totalSumPresent(termId) / jurorMinStake);
     }
 
     function _createRound(

@@ -27,6 +27,10 @@ contract('Court: Staking', ([ pleb, rich ]) => {
   const ZERO_ADDRESS = '0x' + '00'.repeat(20)
 
   const termDuration = 10
+  const commitTerms = 1
+  const revealTerms = 1
+  const appealTerms = 1
+  const appealConfirmTerms = 1
   const finalRoundReduction = 3300 // 100‱ = 1%
 
   const SALT = soliditySha3('passw0rd')
@@ -57,7 +61,7 @@ contract('Court: Staking', ([ pleb, rich ]) => {
       ZERO_ADDRESS,
       1,
       1,
-      [ 1, 1, 1 ],
+      [ commitTerms, revealTerms, appealTerms, appealConfirmTerms ],
       1,
       finalRoundReduction,
       [ 0, 0, 0, 0, 0 ]

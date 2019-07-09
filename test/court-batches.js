@@ -44,6 +44,7 @@ contract('Court: Batches', ([ rich, governor, arbitrable, juror1, juror2, juror3
   const commitTerms = 1
   const revealTerms = 1
   const appealTerms = 1
+  const appealConfirmTerms = 1
   const penaltyPct = 100 // 100‱ = 1%
   const finalRoundReduction = 3300 // 100‱ = 1%
 
@@ -83,7 +84,7 @@ contract('Court: Batches', ([ rich, governor, arbitrable, juror1, juror2, juror3
       governor,
       firstTermStart,
       jurorMinStake,
-      [ commitTerms, appealTerms, revealTerms ],
+      [ commitTerms, revealTerms, appealTerms, appealConfirmTerms ],
       penaltyPct,
       finalRoundReduction,
       [ 0, 0, 0, 0, 0 ]
